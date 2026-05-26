@@ -1,0 +1,125 @@
+Design Notes
+
+Overview
+For this project, I am building a simple multi-agent system to handle customer requests for paper supplies. The system takes in a request, figures out what items are being asked for, checks whether those items are in stock, creates a quote, and records the needed transactions. I decided to split the work across a few smaller agents instead of putting everything into one function.
+
+Agent Design
+My system uses four main agents/functions:
+
+1. Orchestrator Agent
+This is the main controller. It receives the customer request, sends the request to the other agents, and combines their outputs into the final response.
+
+2. Inventory Agent
+This agent checks whether the requested items are available, identifies shortages, and estimates supplier delivery dates if more stock is needed.
+
+3. Quote Agent
+This agent handles pricing. It calculates the quote total, applies any discount rules, and can also look at similar past quotes for reference.
+
+4. Order Agent
+This agent records transactions in the database. It is responsible for logging sales and any stock orders that are needed.
+
+Function Groups by Responsibility
+
+Setup / Database Tools
+- generate_sample_inventory
+  Creates sample inventory data for the system.
+    - Inputs: a list of paper supplies, optional coverage value, optional random seed.
+    - Returns: a pandas DataFrame containing generated inventory records.
+    - Used for: setup/testing, not really an agent tool during normal request handling.
+
+- init_database
+  Sets up the SQLite database and loads the starting data.
+    - Inputs: database engine and optional random seed.
+    - Returns: the database engine after setup is complete.
+    - Used for: system setup before the agents run.
+
+Inventory Tools
+- get_all_inventory
+  Returns all inventory levels for a given date.
+    - Inputs: date string.
+    - Returns: a dictionary mapping item names to available quantities.
+    - Used for: Inventory Agent, especially if you want to inspect all stock at once.
+
+- get_stock_level
+  Checks the stock level for one item on a given date.
+    - Inputs: item name and date.
+    - Returns: a pandas DataFrame with stock information for that item.
+    - Used for: Inventory Agent.
+
+- get_supplier_delivery_date
+  Estimates when new stock can arrive from the supplier.
+    - Inputs: input date string and quantity.
+    - Returns: estimated supplier delivery date as a string.
+    - Used for: Inventory Agent when there is a shortage.
+
+Pricing / Quote Tools
+- search_quote_history
+  Searches for similar past quotes that may help with quote generation.
+    - Inputs: list of search terms and optional result limit.
+    - Returns: a list of dictionaries containing matching quote history.
+    - Used for: Quote Agent.
+
+Transaction / Order Tools
+- create_transaction
+  Records sales or stock-order transactions in the database.
+    - Inputs: transaction details defined by the starter code.
+    - Returns: likely confirmation that the transaction was created or stored.
+    - Used for: Order Agent.
+
+Reporting / Finance Tools
+- get_cash_balance
+  Returns the cash balance as of a certain date.
+    - Inputs: date as string or datetime.
+    - Returns: cash balance as a float.
+    - Used for: optional business-rule support, possibly Order Agent if you want to check affordability of restocking.
+
+- generate_financial_report
+  Creates a summary of financial activity.
+    - Inputs: date as string or datetime.
+    - Returns: a dictionary containing financial report data.
+    - Used for: reporting/analysis, usually not required in the main request flow unless you want extra business insight.
+
+
+Testing / Evaluation Tools
+- run_test_scenarios
+  Runs the provided test cases to evaluate the system.
+
+How the Tools Map to My Agents
+- Inventory Agent:
+  get_all_inventory, get_stock_level, get_supplier_delivery_date
+
+- Quote Agent:
+  search_quote_history and product pricing data
+
+- Order Agent:
+  create_transaction
+
+- Optional support tools:
+  get_cash_balance, generate_financial_report
+
+- Setup/testing:
+  generate_sample_inventory, init_database, run_test_scenarios
+
+Planned Workflow
+1. The Orchestrator Agent receives the customer request.
+2. The request is parsed into item names, quantities, and a delivery date.
+3. The Inventory Agent checks stock for each item.
+4. If an item is out of stock or short, the Inventory Agent estimates a supplier delivery date.
+5. The Quote Agent calculates the total price and any discounts.
+6. The Order Agent records the needed transactions.
+7. The final response is returned with item availability, delivery timing, and quote details.
+
+Design Choices
+I chose a rule-based approach using Python functions because it seems easier to test and debug than relying too much on an LLM. I also like that each agent has a clear job, which makes the system easier to organize. After reviewing the starter code, I replaced my original hypothetical tools with the actual helper functions provided in the project file.
+
+Testing Plan
+My plan is to test each helper function and agent function separately first. After that, I will run the full test scenarios using run_test_scenarios() to make sure the whole system works together.
+
+
+
+
+
+
+
+
+
