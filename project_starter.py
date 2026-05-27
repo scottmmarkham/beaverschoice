@@ -617,8 +617,13 @@ ITEM_ALIASES = {
     "party streamers": "Party streamers",
     "a4": "A4 paper",
     "a4 paper": "A4 paper",
+    "printer paper": "A4 paper",
+    "printing paper": "A4 paper",
+    "a4 printer paper": "A4 paper",
+    "a4 printing paper": "A4 paper",
     "letter paper": "Letter-sized paper",
     "letter-sized paper": "Letter-sized paper",
+    "letter sized paper": "Letter-sized paper",
     "cups": "Paper cups",
     "paper cups": "Paper cups",
     "plates": "Paper plates",
@@ -628,6 +633,7 @@ ITEM_ALIASES = {
     "poster paper": "Poster paper",
     "banner paper": "Banner paper",
     "card stock": "Cardstock",
+    "cardstock": "Cardstock",
     "cardstock paper": "Cardstock",
     "paper napkin": "Paper napkins",
     "paper plate": "Paper plates",
@@ -636,13 +642,29 @@ ITEM_ALIASES = {
     "cup": "Paper cups",
     "napkin": "Paper napkins",
     "table cover": "Table covers",
+    "table covers": "Table covers",
     "flyer": "Flyers",
+    "flyers": "Flyers",
     "notepad": "Notepads",
+    "notepads": "Notepads",
     "envelope": "Envelopes",
+    "envelopes": "Envelopes",
+    "sticky note": "Sticky notes",
+    "sticky notes": "Sticky notes",
+    "invitation card": "Invitation cards",
+    "invitation cards": "Invitation cards",
+    "folder": "Presentation folders",
+    "folders": "Presentation folders",
+    "poster board": "Large poster paper (24x36 inches)",
+    "display board": "Large poster paper (24x36 inches)",
 }
+
 
 def normalize_item_name(name: str) -> str:
     cleaned = name.strip().lower()
+    cleaned = re.sub(r"[^\w\s\-]", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
     if cleaned in ITEM_ALIASES:
         return ITEM_ALIASES[cleaned]
 
@@ -650,7 +672,147 @@ def normalize_item_name(name: str) -> str:
         if cleaned == supported.lower():
             return supported
 
+    # phrase-based normalization for common descriptive requests
+    if "a4" in cleaned and ("paper" in cleaned or "printer" in cleaned or "printing" in cleaned):
+        return "A4 paper"
+
+    if ("letter" in cleaned or "letter-sized" in cleaned) and "paper" in cleaned:
+        return "Letter-sized paper"
+
+    if "cardstock" in cleaned or "card stock" in cleaned:
+        return "Cardstock"
+
+    if "colored paper" in cleaned or "colour paper" in cleaned:
+        return "Colored paper"
+
+    if "glossy" in cleaned and "paper" in cleaned:
+        return "Glossy paper"
+
+    if "matte" in cleaned and "paper" in cleaned:
+        return "Matte paper"
+
+    if "recycled" in cleaned and "paper" in cleaned:
+        return "Recycled paper"
+
+    if "eco-friendly" in cleaned and "paper" in cleaned:
+        return "Eco-friendly paper"
+
+    if "poster" in cleaned and "paper" in cleaned:
+        return "Poster paper"
+
+    if "banner" in cleaned and "paper" in cleaned:
+        return "Banner paper"
+
+    if "kraft" in cleaned and "paper" in cleaned:
+        return "Kraft paper"
+
+    if "construction" in cleaned and "paper" in cleaned:
+        return "Construction paper"
+
+    if "wrapping" in cleaned and "paper" in cleaned:
+        return "Wrapping paper"
+
+    if "glitter" in cleaned and "paper" in cleaned:
+        return "Glitter paper"
+
+    if "decorative" in cleaned and "paper" in cleaned:
+        return "Decorative paper"
+
+    if "letterhead" in cleaned and "paper" in cleaned:
+        return "Letterhead paper"
+
+    if "legal" in cleaned and "paper" in cleaned:
+        return "Legal-size paper"
+
+    if "crepe" in cleaned and "paper" in cleaned:
+        return "Crepe paper"
+
+    if "photo" in cleaned and "paper" in cleaned:
+        return "Photo paper"
+
+    if "uncoated" in cleaned and "paper" in cleaned:
+        return "Uncoated paper"
+
+    if "butcher" in cleaned and "paper" in cleaned:
+        return "Butcher paper"
+
+    if "heavyweight" in cleaned and "paper" in cleaned:
+        return "Heavyweight paper"
+
+    if "standard copy paper" in cleaned or ("standard" in cleaned and "copy paper" in cleaned):
+        return "Standard copy paper"
+
+    if "bright-colored" in cleaned and "paper" in cleaned:
+        return "Bright-colored paper"
+
+    if "patterned" in cleaned and "paper" in cleaned:
+        return "Patterned paper"
+
+    if "plate" in cleaned:
+        return "Paper plates"
+
+    if "cup" in cleaned:
+        return "Paper cups"
+
+    if "napkin" in cleaned:
+        return "Paper napkins"
+
+    if "disposable cup" in cleaned:
+        return "Disposable cups"
+
+    if "table cover" in cleaned:
+        return "Table covers"
+
+    if "envelope" in cleaned:
+        return "Envelopes"
+
+    if "sticky note" in cleaned:
+        return "Sticky notes"
+
+    if "notepad" in cleaned:
+        return "Notepads"
+
+    if "invitation card" in cleaned:
+        return "Invitation cards"
+
+    if "flyer" in cleaned:
+        return "Flyers"
+
+    if "streamer" in cleaned:
+        return "Party streamers"
+
+    if "washi tape" in cleaned or "decorative adhesive tape" in cleaned:
+        return "Decorative adhesive tape (washi tape)"
+
+    if "party bag" in cleaned:
+        return "Paper party bags"
+
+    if "name tag" in cleaned:
+        return "Name tags with lanyards"
+
+    if "presentation folder" in cleaned or "folder" in cleaned:
+        return "Presentation folders"
+
+    if "large poster" in cleaned or "poster board" in cleaned or "display board" in cleaned:
+        return "Large poster paper (24x36 inches)"
+
+    if "banner roll" in cleaned or "rolls of banner paper" in cleaned:
+        return "Rolls of banner paper (36-inch width)"
+
+    if "100 lb cover stock" in cleaned or "cover stock" in cleaned:
+        return "100 lb cover stock"
+
+    if "80 lb text paper" in cleaned or "text paper" in cleaned:
+        return "80 lb text paper"
+
+    if "250 gsm cardstock" in cleaned or "250gsm cardstock" in cleaned:
+        return "250 gsm cardstock"
+
+    if "220 gsm poster paper" in cleaned or "220gsm poster paper" in cleaned:
+        return "220 gsm poster paper"
+
     return name.strip()
+
 
 def extract_stock_number(agent_output: Any) -> int:
     text = str(agent_output)
@@ -699,6 +861,8 @@ def parse_customer_request(request_text: str) -> Dict[str, Any]:
 
     items = []
     unsupported_items = []
+    merged_items = {}
+
 
     filler_prefix = (
         r"^(please|pls|i need|i want|we need|we want|can i order|"
@@ -731,11 +895,15 @@ def parse_customer_request(request_text: str) -> Dict[str, Any]:
         normalized_name = normalize_item_name(raw_name)
 
         if normalized_name in SUPPORTED_ITEMS:
-            items.append({
-                "raw_name": raw_name,
-                "item_name": normalized_name,
-                "quantity": quantity,
-            })
+            if normalized_name in merged_items:
+                merged_items[normalized_name]["quantity"] += quantity
+            else:
+                merged_items[normalized_name] = {
+                    "raw_name": raw_name,
+                    "item_name": normalized_name,
+                    "quantity": quantity,
+                }
+
         else:
             unsupported_items.append({
                 "raw_name": raw_name,
@@ -745,6 +913,8 @@ def parse_customer_request(request_text: str) -> Dict[str, Any]:
 
     print("PARSED ITEMS:", items)
     print("UNSUPPORTED ITEMS:", unsupported_items)
+
+    items = list(merged_items.values())
 
     return {
         "requested_date": requested_date,
@@ -1132,7 +1302,7 @@ def run_test_scenarios():
             }
         )
 
-        time.sleep(1)
+        # time.sleep(1)
 
     # Final report
     final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")

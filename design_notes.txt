@@ -1,125 +1,113 @@
-Design Notes
+Reflection Report
 
-Overview
-For this project, I am building a simple multi-agent system to handle customer requests for paper supplies. The system takes in a request, figures out what items are being asked for, checks whether those items are in stock, creates a quote, and records the needed transactions. I decided to split the work across a few smaller agents instead of putting everything into one function.
+Project Overview
+For this project, I built a multi-agent system for handling customer requests for paper supply products. The system accepts a natural-language request, extracts the requested items and quantities, checks inventory, determines whether any items are short or out of stock, generates a quote, records the appropriate transactions, and returns a customer-facing response.
 
-Agent Design
-My system uses four main agents/functions:
+My goal was to design a system that separates responsibilities clearly while still keeping the overall workflow easy to test and debug. Rather than relying entirely on a language model to make business decisions, I used deterministic Python logic for the core workflow and used agent-style decomposition to organize the system into smaller, focused responsibilities.
+
+System Architecture
+The system is organized around an orchestrator and several specialized agents/functions:
 
 1. Orchestrator Agent
-This is the main controller. It receives the customer request, sends the request to the other agents, and combines their outputs into the final response.
+The orchestrator is the main controller for the workflow. It receives the customer request, calls the parsing logic, routes work to the inventory, quote, and order components, and combines the results into a final response. I used this component to keep the end-to-end flow centralized and readable.
 
 2. Inventory Agent
-This agent checks whether the requested items are available, identifies shortages, and estimates supplier delivery dates if more stock is needed.
+The inventory component is responsible for checking current stock levels for requested items, identifying shortages, and estimating supplier delivery dates when inventory is insufficient. This part of the system uses the inventory-related helper tools to ground decisions in database data rather than assumptions.
 
 3. Quote Agent
-This agent handles pricing. It calculates the quote total, applies any discount rules, and can also look at similar past quotes for reference.
+The quote component calculates pricing for requested items and can reference prior quote history for similar requests. Its role is to produce the pricing portion of the workflow while remaining separate from inventory and transaction logic.
 
 4. Order Agent
-This agent records transactions in the database. It is responsible for logging sales and any stock orders that are needed.
+The order component records transactions in the database. When items are fulfilled from stock, it records the sale transaction. When shortages occur, it records the corresponding stock-order activity needed to satisfy the request.
 
-Function Groups by Responsibility
+Why I Chose This Design
+I chose a multi-agent structure because the project naturally breaks into distinct business tasks: understanding the request, checking stock, pricing the order, and recording the results. Separating these concerns made the code easier to reason about and easier to improve incrementally.
 
-Setup / Database Tools
-- generate_sample_inventory
-  Creates sample inventory data for the system.
-    - Inputs: a list of paper supplies, optional coverage value, optional random seed.
-    - Returns: a pandas DataFrame containing generated inventory records.
-    - Used for: setup/testing, not really an agent tool during normal request handling.
+I also chose to keep the most important business logic deterministic in Python instead of depending entirely on LLM output. This was especially important for request parsing, inventory checks, quantity calculations, and transaction creation. A deterministic approach made the system more reliable, easier to test, and less likely to fail on repeated runs.
 
-- init_database
-  Sets up the SQLite database and loads the starting data.
-    - Inputs: database engine and optional random seed.
-    - Returns: the database engine after setup is complete.
-    - Used for: system setup before the agents run.
+Tool and Function Usage
+The project starter code provided several helper functions, and I mapped them to the agent responsibilities rather than inventing separate tools unnecessarily.
 
-Inventory Tools
+Inventory-related tools:
 - get_all_inventory
-  Returns all inventory levels for a given date.
-    - Inputs: date string.
-    - Returns: a dictionary mapping item names to available quantities.
-    - Used for: Inventory Agent, especially if you want to inspect all stock at once.
-
 - get_stock_level
-  Checks the stock level for one item on a given date.
-    - Inputs: item name and date.
-    - Returns: a pandas DataFrame with stock information for that item.
-    - Used for: Inventory Agent.
-
 - get_supplier_delivery_date
-  Estimates when new stock can arrive from the supplier.
-    - Inputs: input date string and quantity.
-    - Returns: estimated supplier delivery date as a string.
-    - Used for: Inventory Agent when there is a shortage.
 
-Pricing / Quote Tools
+Quote-related tools:
 - search_quote_history
-  Searches for similar past quotes that may help with quote generation.
-    - Inputs: list of search terms and optional result limit.
-    - Returns: a list of dictionaries containing matching quote history.
-    - Used for: Quote Agent.
+- product pricing data already available in the project
 
-Transaction / Order Tools
+Order/transaction tools:
 - create_transaction
-  Records sales or stock-order transactions in the database.
-    - Inputs: transaction details defined by the starter code.
-    - Returns: likely confirmation that the transaction was created or stored.
-    - Used for: Order Agent.
 
-Reporting / Finance Tools
-- get_cash_balance
-  Returns the cash balance as of a certain date.
-    - Inputs: date as string or datetime.
-    - Returns: cash balance as a float.
-    - Used for: optional business-rule support, possibly Order Agent if you want to check affordability of restocking.
-
-- generate_financial_report
-  Creates a summary of financial activity.
-    - Inputs: date as string or datetime.
-    - Returns: a dictionary containing financial report data.
-    - Used for: reporting/analysis, usually not required in the main request flow unless you want extra business insight.
-
-
-Testing / Evaluation Tools
+Setup and testing tools:
+- generate_sample_inventory
+- init_database
 - run_test_scenarios
-  Runs the provided test cases to evaluate the system.
 
-How the Tools Map to My Agents
-- Inventory Agent:
-  get_all_inventory, get_stock_level, get_supplier_delivery_date
+Optional business/reporting tools:
+- get_cash_balance
+- generate_financial_report
 
-- Quote Agent:
-  search_quote_history and product pricing data
+This mapping helped keep the implementation aligned with the provided project structure while still reflecting a multi-agent design.
 
-- Order Agent:
-  create_transaction
+Workflow
+The final workflow of the system is:
 
-- Optional support tools:
-  get_cash_balance, generate_financial_report
+1. Receive a customer request in natural language.
+2. Parse the request into requested items, quantities, and request date.
+3. Normalize item names so common singular/plural and alias variations map to supported inventory items.
+4. Check inventory for each requested item.
+5. Determine whether each item is fully available, partially available, or unavailable.
+6. Estimate supplier delivery timing for shortages.
+7. Calculate quote totals.
+8. Record the relevant transactions in the database.
+9. Return a final response summarizing availability, shortages, pricing, and delivery timing.
 
-- Setup/testing:
-  generate_sample_inventory, init_database, run_test_scenarios
+Key Implementation Decisions
+One of the most important parts of the project was improving the request parser. Early versions of the parser were too brittle and failed on realistic customer phrasing. I revised the parsing logic so it could better handle:
+- multiple requested items in one sentence
+- punctuation such as commas, question marks, and periods
+- filler phrases such as “please send,” “I need,” or “I’d like”
+- singular and plural item variations
+- unsupported items, which should be preserved and reported rather than silently dropped
+- duplicate item mentions, which can be merged into a single quantity total
 
-Planned Workflow
-1. The Orchestrator Agent receives the customer request.
-2. The request is parsed into item names, quantities, and a delivery date.
-3. The Inventory Agent checks stock for each item.
-4. If an item is out of stock or short, the Inventory Agent estimates a supplier delivery date.
-5. The Quote Agent calculates the total price and any discounts.
-6. The Order Agent records the needed transactions.
-7. The final response is returned with item availability, delivery timing, and quote details.
+This was an important improvement because the quality of the entire workflow depends on correctly extracting the customer’s request.
 
-Design Choices
-I chose a rule-based approach using Python functions because it seems easier to test and debug than relying too much on an LLM. I also like that each agent has a clear job, which makes the system easier to organize. After reviewing the starter code, I replaced my original hypothetical tools with the actual helper functions provided in the project file.
+Another important design decision was normalizing item names before inventory lookup. This reduced failures caused by small wording differences such as “cup” vs. “cups” or “sticky note” vs. “sticky notes.”
 
-Testing Plan
-My plan is to test each helper function and agent function separately first. After that, I will run the full test scenarios using run_test_scenarios() to make sure the whole system works together.
+I also updated quote-history search behavior so that searches across multiple terms were more flexible. Using broader matching improved the usefulness of historical quote retrieval.
 
+Challenges and How I Addressed Them
+The main challenge in this project was balancing an agent-based design with predictable system behavior. A purely LLM-driven solution would have been simpler to describe conceptually, but it would have been harder to validate and debug. I addressed this by using the agent structure mainly for separation of responsibilities while keeping the actual business logic grounded in Python and database-backed helper functions.
 
+Another challenge was handling natural-language variation in customer requests. Real requests are often messy, and the parser needed several improvements before it could handle more realistic phrasing. I addressed this by making the parsing flow more structured: extract the date first, remove known filler text, split the request into chunks, identify quantity-item pairs, normalize the item names, and preserve unsupported requests for reporting.
 
+Testing and Validation
+I tested the system using both targeted parser checks and end-to-end scenarios. My testing focused on:
+- supported item requests that are fully in stock
+- partially fulfilled requests
+- completely out-of-stock requests
+- unsupported item requests
+- requests with punctuation and conversational phrasing
+- alias and singular/plural normalization
+- database transaction creation after processing requests
 
+This testing helped reveal weaknesses in parsing and response generation, which led to several refinements in the implementation.
 
+What I Learned
+This project reinforced that multi-agent design is most useful when each component has a clear responsibility and a well-defined interface. I also learned that natural-language input handling is often the weakest part of a system unless it is carefully normalized and validated before downstream processing.
 
+A second key lesson was that deterministic logic is often the best choice for business rules, even in an agentic system. The agent pattern helped structure the solution, but reliability came from explicit parsing, normalization, inventory checks, and transaction logic.
 
+Future Improvements
+If I continued improving this project, I would:
+- expand the parser to support more request formats such as “cups x 10”
+- improve the final response formatting to make customer messages more polished
+- strengthen automated tests further with more edge cases
+- make quote-history usage more intelligent when generating pricing context
+- separate quote generation from transaction creation more explicitly if the business process required quotes to be non-binding until accepted
 
-
+Overall Reflection
+Overall, I believe the final design is a practical multi-agent solution that balances modularity with reliability. The orchestrator-and-specialist structure made the workflow easier to understand, while the deterministic implementation choices made the system easier to test and improve. The strongest part of the final solution is the clearer separation of responsibilities combined with more robust request parsing and normalization.
