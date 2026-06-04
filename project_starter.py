@@ -813,6 +813,15 @@ def normalize_item_name(name: str) -> str:
 
     return name.strip()
 
+def parse_agent_dict_output(agent_output: Any) -> Dict[str, Any]:
+    text = str(agent_output).strip()
+    try:
+        parsed = ast.literal_eval(text)
+        if isinstance(parsed, dict):
+            return parsed
+        return {"raw_output": text, "_parse_failed": True}
+    except Exception:
+        return {"raw_output": text, "_parse_failed": True}
 
 def extract_stock_number(agent_output: Any) -> int:
     text = str(agent_output)
@@ -911,10 +920,10 @@ def parse_customer_request(request_text: str) -> Dict[str, Any]:
                 "quantity": quantity,
             })
 
+    items = list(merged_items.values())
+
     print("PARSED ITEMS:", items)
     print("UNSUPPORTED ITEMS:", unsupported_items)
-
-    items = list(merged_items.values())
 
     return {
         "requested_date": requested_date,
@@ -945,7 +954,10 @@ def inventory_check_tool(item_name: str, as_of_date: str) -> str:
     else:
         current_stock = int(stock_df["current_stock"].iloc[0] or 0)
 
-    return f"item_name={item_name}; current_stock={current_stock}"
+    return str({
+        "item_name": item_name,
+        "current_stock": current_stock
+    })
 
 @tool
 def supplier_delivery_tool(input_date_str: str, quantity: int) -> str:
@@ -960,7 +972,10 @@ def supplier_delivery_tool(input_date_str: str, quantity: int) -> str:
         A compact string containing the estimated supplier delivery date.
     """
     delivery_date = get_supplier_delivery_date(input_date_str, quantity)
-    return f"delivery_date={delivery_date}"
+    return str({
+        "delivery_date": delivery_date
+    })
+
 
 # Tools for quoting agent
 @tool
@@ -994,7 +1009,9 @@ def create_sales_transaction_tool(item_name: str, quantity: int, price: float, d
         A compact string containing the created sales transaction identifier.
     """
     transaction_id = create_transaction(item_name, "sales", quantity, price, date)
-    return f"sales_transaction_id={transaction_id}"
+    return str({
+        "sales_transaction_id": transaction_id
+    })
 
 
 @tool
@@ -1012,28 +1029,30 @@ def create_stock_order_transaction_tool(item_name: str, quantity: int, price: fl
         A compact string containing the created stock order transaction identifier.
     """
     transaction_id = create_transaction(item_name, "stock_orders", quantity, price, date)
-    return f"stock_order_transaction_id={transaction_id}"
+    return str({
+        "stock_order_transaction_id": transaction_id
+    })
 # Set up your agents and create an orchestration agent that will manage them.
 
 inventory_agent = CodeAgent(
     tools=[inventory_check_tool, supplier_delivery_tool],
     model=model,
     name="inventory_agent",
-    description="Checks inventory levels and supplier delivery dates for requested items.",
+    description="Use tools to check stock levels and supplier delivery dates. Return structured dictionary-style outputs only.",
 )
 
 quote_agent = CodeAgent(
     tools=[quote_history_tool],
     model=model,
     name="quote_agent",
-    description="Looks up similar historical quotes for context.",
+    description="Use quote history tool to retrieve similar historical quotes. Return structured dictionary-style outputs only.",
 )
 
 order_agent = CodeAgent(
     tools=[create_sales_transaction_tool, create_stock_order_transaction_tool],
     model=model,
     name="order_agent",
-    description="Records sales and stock order transactions after a quote is prepared.",
+    description="Use transaction tools to create sales and stock-order records. Return structured dictionary-style outputs only.",
 )
 
 orchestrator_agent = CodeAgent(
@@ -1041,193 +1060,140 @@ orchestrator_agent = CodeAgent(
     managed_agents=[inventory_agent, quote_agent, order_agent],
     model=model,
     name="orchestrator_agent",
-    description="Coordinates inventory, quote history, and order recording agents to process customer requests.",
+    description="Primary workflow controller. Delegates to worker agents, decides fulfillment/restocking flow, records transactions through managed agents, and returns one final structured dictionary.",
 )
 
 def build_orchestrator_prompt(parsed_request: dict) -> str:
     return f"""
 You are the orchestration agent for a paper sales company.
 
-Your job:
-1. Use inventory_agent to check stock for each requested item on the requested date.
-2. If any item is short, use inventory_agent to estimate supplier delivery date for the shortage.
-3. Use quote_agent to search for similar historical quotes.
-4. If the request can proceed, use order_agent to record needed transactions.
-5. Return a concise structured summary.
+You must control the workflow yourself by delegating tasks to the managed agents:
+- inventory_agent
+- quote_agent
+- order_agent
 
-Requested date: {parsed_request['requested_date']}
-Requested items: {parsed_request['items']}
-Unsupported items: {parsed_request['unsupported_items']}
+Customer request data:
+- requested_date: {parsed_request['requested_date']}
+- requested_items: {parsed_request['items']}
+- unsupported_items: {parsed_request['unsupported_items']}
+
+Your responsibilities:
+1. For each requested supported item, ask inventory_agent to check stock on the requested date.
+2. Decide whether each item is:
+   - in_stock
+   - partial_stock
+   - out_of_stock
+3. If there is a shortage, ask inventory_agent for supplier delivery timing for the shortage quantity.
+4. Ask quote_agent for similar historical quotes using the recognized item names.
+5. For fulfilled quantities, ask order_agent to create sales transactions.
+6. For shortages, ask order_agent to create stock order transactions.
+7. Compute:
+   - recognized_items
+   - stock_status
+   - restocking_needs
+   - estimated_delivery
+   - subtotal
+   - discount_rate
+   - discount_amount
+   - quoted_total
+   - unsupported_items
+   - historical_quotes
+   - customer_message
 
 Important rules:
-- Do not invent stock numbers, prices, or delivery dates.
-- Use tools/managed agents for inventory, delivery, quote history, and transactions.
-- Keep the response structured and concise.
+- You must perform the workflow through delegation to managed agents.
+- Do not just summarize; return the final result as a Python dictionary.
+- Worker-agent outputs should be treated as structured tool results and incorporated into your final answer.
+- Use exact item names from the request data.
+- Use these prices:
+{PRICE_LIST}
+- Discount rules:
+  - subtotal > 500 => 10%
+  - subtotal > 200 => 5%
+  - otherwise 0%
+- If no supported items are recognized, stock_status should be "unsupported_request".
+- Internal fields such as recognized_items, restocking_needs, historical_quotes, stock calculations, and transaction details are for system use only.
+- customer_message must be the only customer-facing summary.
+- customer_message should clearly describe:
+  - fulfilled items
+  - pending restocks
+  - unsupported items
+  - discount application when relevant
+  - why an item cannot be fulfilled when relevant
+- customer_message must be concise, professional, and customer-oriented.
+- Do not include chain-of-thought, internal reasoning, debug logs, agent scratch work, raw managed-agent transcripts, transaction IDs, raw stock tables, or internal orchestration text in customer_message.
+- Return exactly one final valid Python dictionary with this schema:
+
+{{
+  "recognized_items": list,
+  "stock_status": str,
+  "restocking_needs": list,
+  "estimated_delivery": str,
+  "subtotal": float,
+  "discount_rate": float,
+  "discount_amount": float,
+  "quoted_total": float,
+  "unsupported_items": list,
+  "historical_quotes": str,
+  "customer_message": str
+}}
+
+Return only a valid Python dictionary.
 """
 
 def call_your_multi_agent_system(customer_request: str) -> Dict[str, Any]:
     parsed_request = parse_customer_request(customer_request)
-    requested_date = parsed_request["requested_date"]
-    requested_items = parsed_request["items"]
-    unsupported_items = parsed_request["unsupported_items"]
 
-    orchestrator_summary = orchestrator_agent.run(
+    orchestrator_result = orchestrator_agent.run(
         build_orchestrator_prompt(parsed_request)
     )
 
-    recognized_items = []
-    restocking_needs = []
-    estimated_delivery = requested_date
+    response = parse_agent_dict_output(orchestrator_result)
 
-    for item in requested_items:
-        item_name = item["item_name"]
-        quantity = item["quantity"]
-
-        stock_result = inventory_agent.run(
-            f"Use inventory_check_tool with item_name='{item_name}' and as_of_date='{requested_date}'. "
-            f"Return the tool result only."
-        )
-        current_stock = extract_stock_number(stock_result)
-
-        fulfilled_now = min(current_stock, quantity)
-        shortage = max(0, quantity - current_stock)
-
-        if fulfilled_now == quantity:
-            stock_status = "in_stock"
-            item_delivery = requested_date
-        elif fulfilled_now > 0:
-            stock_status = "partial_stock"
-            delivery_result = inventory_agent.run(
-                f"Use supplier_delivery_tool with input_date_str='{requested_date}' and quantity={shortage}. "
-                f"Return the tool result only."
-            )
-            item_delivery = extract_delivery_date(delivery_result) or requested_date
-        else:
-            stock_status = "out_of_stock"
-            delivery_result = inventory_agent.run(
-                f"Use supplier_delivery_tool with input_date_str='{requested_date}' and quantity={shortage}. "
-                f"Return the tool result only."
-            )
-            item_delivery = extract_delivery_date(delivery_result) or requested_date
-
-        unit_price = PRICE_LIST[item_name]
-        line_total = round(unit_price * quantity, 2)
-        fulfilled_total = round(unit_price * fulfilled_now, 2)
-        shortage_total = round(unit_price * shortage, 2)
-
-        if shortage > 0:
-            restocking_needs.append({
-                "item_name": item_name,
-                "shortage": shortage,
-                "supplier_delivery_date": item_delivery,
-            })
-            if item_delivery and item_delivery > estimated_delivery:
-                estimated_delivery = item_delivery
-
-        recognized_items.append({
-            "item_name": item_name,
-            "quantity": quantity,
-            "current_stock": current_stock,
-            "fulfilled_now": fulfilled_now,
-            "shortage": shortage,
-            "stock_status": stock_status,
-            "estimated_delivery": item_delivery,
-            "unit_price": unit_price,
-            "line_total": line_total,
-            "fulfilled_total": fulfilled_total,
-            "shortage_total": shortage_total,
-        })
-
-    subtotal = round(sum(item["line_total"] for item in recognized_items), 2)
-    discount_rate = calculate_discount(subtotal)
-    discount_amount = round(subtotal * discount_rate, 2)
-    quoted_total = round(subtotal - discount_amount, 2)
-
-    search_terms = [item["item_name"] for item in requested_items]
-
-    # Historical quotes are included as contextual support for the quote, not as a direct pricing override.
-    historical_quotes = (
-        str(
-            quote_agent.run(
-                f"Use quote_history_tool with search_terms='{', '.join(search_terms)}'. "
-                f"Return the tool result only."
-            )
-        )
-        if search_terms else ""
-    )
-
-    for item in recognized_items:
-        if item["fulfilled_now"] > 0:
-            order_agent.run(
-                f"Use create_sales_transaction_tool with "
-                f"item_name='{item['item_name']}', "
-                f"quantity={item['fulfilled_now']}, "
-                f"price={item['fulfilled_total']}, "
-                f"date='{requested_date}'. "
-                f"Return the tool result only."
-            )
-
-        if item["shortage"] > 0:
-            order_agent.run(
-                f"Use create_stock_order_transaction_tool with "
-                f"item_name='{item['item_name']}', "
-                f"quantity={item['shortage']}, "
-                f"price={item['shortage_total']}, "
-                f"date='{requested_date}'. "
-                f"Return the tool result only."
-            )
-
-    if restocking_needs:
-        overall_status = "pending_restock"
-    elif recognized_items:
-        overall_status = "ready_to_fulfill"
-    else:
-        overall_status = "unsupported_request"
-
-    fulfilled_lines = []
-    pending_lines = []
-    unsupported_lines = []
-
-    for item in recognized_items:
-        if item["fulfilled_now"] > 0:
-            fulfilled_lines.append(
-                f"{item['fulfilled_now']} of {item['quantity']} {item['item_name']} fulfilled now"
-            )
-        if item["shortage"] > 0:
-            pending_lines.append(
-                f"{item['shortage']} of {item['item_name']} restock-ordered, estimated delivery {item['estimated_delivery']}"
-            )
-
-    for item in unsupported_items:
-        unsupported_lines.append(
-            f"{item['quantity']} of {item['raw_name']} unsupported"
-        )
-
-    message_parts = []
-    if fulfilled_lines:
-        message_parts.append("Fulfilled now: " + "; ".join(fulfilled_lines) + ".")
-    if pending_lines:
-        message_parts.append("Pending restock: " + "; ".join(pending_lines) + ".")
-    if unsupported_lines:
-        message_parts.append("Unsupported items: " + "; ".join(unsupported_lines) + ".")
-
-    customer_message = " ".join(message_parts) if message_parts else "No supported items were found in the request."
-    
-
-    return {
-        "orchestrator_summary": str(orchestrator_summary),
-        "recognized_items": recognized_items,
-        "stock_status": overall_status,
-        "restocking_needs": restocking_needs,
-        "estimated_delivery": estimated_delivery,
-        "subtotal": subtotal,
-        "discount_rate": discount_rate,
-        "discount_amount": discount_amount,
-        "quoted_total": quoted_total,
-        "unsupported_items": unsupported_items,
-        "historical_quotes": historical_quotes,
-        "customer_message": customer_message,
+    defaults = {
+        "recognized_items": [],
+        "stock_status": "unsupported_request" if not parsed_request["items"] else "pending_restock",
+        "restocking_needs": [],
+        "estimated_delivery": parsed_request["requested_date"],
+        "subtotal": 0.0,
+        "discount_rate": 0.0,
+        "discount_amount": 0.0,
+        "quoted_total": 0.0,
+        "unsupported_items": parsed_request["unsupported_items"],
+        "historical_quotes": "",
+        "customer_message": "We could not fully process your request."
     }
+
+    if not isinstance(response, dict) or response.get("_parse_failed"):
+        internal_result = {
+            "orchestrator_summary": str(orchestrator_result),
+            **defaults
+        }
+    else:
+        internal_result = {
+            "orchestrator_summary": str(orchestrator_result),
+            "recognized_items": response.get("recognized_items", defaults["recognized_items"]),
+            "stock_status": response.get("stock_status", defaults["stock_status"]),
+            "restocking_needs": response.get("restocking_needs", defaults["restocking_needs"]),
+            "estimated_delivery": response.get("estimated_delivery", defaults["estimated_delivery"]),
+            "subtotal": float(response.get("subtotal", defaults["subtotal"])),
+            "discount_rate": float(response.get("discount_rate", defaults["discount_rate"])),
+            "discount_amount": float(response.get("discount_amount", defaults["discount_amount"])),
+            "quoted_total": float(response.get("quoted_total", defaults["quoted_total"])),
+            "unsupported_items": response.get("unsupported_items", defaults["unsupported_items"]),
+            "historical_quotes": response.get("historical_quotes", defaults["historical_quotes"]),
+            "customer_message": response.get("customer_message", defaults["customer_message"]),
+        }
+
+    final_payload = {
+        "customer_response": internal_result["customer_message"],
+        "stock_status": internal_result["stock_status"],
+        "quoted_total": internal_result["quoted_total"],
+        "estimated_delivery": internal_result["estimated_delivery"],
+        "internal_result": internal_result,
+    }
+
+    return final_payload
 
 # Run your test scenarios by writing them here. Make sure to keep track of them.
 
@@ -1288,7 +1254,7 @@ def run_test_scenarios():
         current_cash = report["cash_balance"]
         current_inventory = report["inventory_value"]
 
-        print(f"Response: {response}")
+        print(f"Customer Response: {response.get('customer_response', 'We could not fully process your request.')}")
         print(f"Updated Cash: ${current_cash:.2f}")
         print(f"Updated Inventory: ${current_inventory:.2f}")
 
@@ -1298,9 +1264,10 @@ def run_test_scenarios():
                 "request_date": request_date,
                 "cash_balance": current_cash,
                 "inventory_value": current_inventory,
-                "response": response,
+                "response": response.get("customer_response", "We could not fully process your request."),
             }
         )
+
 
         # time.sleep(1)
 

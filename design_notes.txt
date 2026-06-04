@@ -1,113 +1,160 @@
-Reflection Report
+Design Notes and Reflection
 
-Project Overview
-For this project, I built a multi-agent system for handling customer requests for paper supply products. The system accepts a natural-language request, extracts the requested items and quantities, checks inventory, determines whether any items are short or out of stock, generates a quote, records the appropriate transactions, and returns a customer-facing response.
+System Overview
 
-My goal was to design a system that separates responsibilities clearly while still keeping the overall workflow easy to test and debug. Rather than relying entirely on a language model to make business decisions, I used deterministic Python logic for the core workflow and used agent-style decomposition to organize the system into smaller, focused responsibilities.
+This project implements a multi-agent sales support workflow for Beaver's Choice Paper Company. The system receives a customer request, parses the requested items and date, checks inventory, determines whether items can be fulfilled immediately or require restocking, looks up similar historical quotes, records transactions, and produces a customer-facing response.
 
-System Architecture
-The system is organized around an orchestrator and several specialized agents/functions:
+The architecture uses an orchestrator-style design with supporting worker agents and deterministic business logic. The orchestrator agent is intended to control the workflow by delegating tasks to specialized agents, while Python outside the orchestrator mainly handles request parsing plus light validation and fallback/default handling. This design was chosen to balance flexibility from LLM-based reasoning with reliability for inventory and transaction logic.
 
-1. Orchestrator Agent
-The orchestrator is the main controller for the workflow. It receives the customer request, calls the parsing logic, routes work to the inventory, quote, and order components, and combines the results into a final response. I used this component to keep the end-to-end flow centralized and readable.
+Workflow Diagram Explanation
 
-2. Inventory Agent
-The inventory component is responsible for checking current stock levels for requested items, identifying shortages, and estimating supplier delivery dates when inventory is insufficient. This part of the system uses the inventory-related helper tools to ground decisions in database data rather than assumptions.
+The workflow diagram for this project shows four main components:
 
-3. Quote Agent
-The quote component calculates pricing for requested items and can reference prior quote history for similar requests. Its role is to produce the pricing portion of the workflow while remaining separate from inventory and transaction logic.
+1. Request Parser / Normalizer
+   - Extracts the request date, item names, and quantities from the incoming customer message.
+   - Maps aliases such as “card stock” to canonical item names such as “Cardstock.”
+   - Separates supported items from unsupported items.
 
-4. Order Agent
-The order component records transactions in the database. When items are fulfilled from stock, it records the sale transaction. When shortages occur, it records the corresponding stock-order activity needed to satisfy the request.
+2. Orchestrator Agent
+   - Receives the parsed request.
+   - Delegates inventory checks and supplier delivery-date estimation to the inventory agent.
+   - Delegates quote-history lookup to the quote agent.
+   - Delegates transaction creation to the order agent.
+   - Synthesizes the final structured result, including stock status, totals, restocking needs, and the final customer-facing message.
 
-Why I Chose This Design
-I chose a multi-agent structure because the project naturally breaks into distinct business tasks: understanding the request, checking stock, pricing the order, and recording the results. Separating these concerns made the code easier to reason about and easier to improve incrementally.
+3. Worker Agents
+   - Inventory agent: checks stock levels and supplier delivery timing.
+   - Quote agent: retrieves similar historical quotes from the quote database.
+   - Order agent: records sales transactions and stock-order transactions.
 
-I also chose to keep the most important business logic deterministic in Python instead of depending entirely on LLM output. This was especially important for request parsing, inventory checks, quantity calculations, and transaction creation. A deterministic approach made the system more reliable, easier to test, and less likely to fail on repeated runs.
+4. Database / Data Layer
+   - Stores inventory, quote history, quote requests, and transactions.
+   - Provides the source of truth for stock levels, cash balance, and inventory value.
+
+The decision-making process behind this architecture was to separate responsibilities clearly. Inventory lookups, quote lookup, and transaction recording are distinct tasks, so they were assigned to different worker agents. The orchestrator sits above them and is responsible for sequencing those tasks and combining their outputs into one final answer. This makes the system easier to reason about and easier to extend than a single monolithic agent.
 
 Tool and Function Usage
-The project starter code provided several helper functions, and I mapped them to the agent responsibilities rather than inventing separate tools unnecessarily.
 
-Inventory-related tools:
-- get_all_inventory
-- get_stock_level
-- get_supplier_delivery_date
+The wrapped tools used by the final implementation are:
 
-Quote-related tools:
-- search_quote_history
-- product pricing data already available in the project
+- inventory_check_tool
+- supplier_delivery_tool
+- quote_history_tool
+- create_sales_transaction_tool
+- create_stock_order_transaction_tool
 
-Order/transaction tools:
-- create_transaction
+These tools support the main business tasks of checking stock, estimating supplier timing, referencing prior quote information, recording completed sales, and recording stock replenishment actions.
 
-Setup and testing tools:
-- generate_sample_inventory
-- init_database
-- run_test_scenarios
+An important correction is that get_all_inventory is not currently wrapped as an implemented tool in the system. Earlier descriptions overstated the tool coverage by implying that broader inventory retrieval was directly exposed as a wrapped tool. The reflection should therefore focus on the tools that are actually implemented and used in the code.
 
-Optional business/reporting tools:
-- get_cash_balance
-- generate_financial_report
+Why Deterministic Logic Was Used
 
-This mapping helped keep the implementation aligned with the provided project structure while still reflecting a multi-agent design.
+The system combines LLM-based orchestration with deterministic business logic because some tasks need to be reliable and repeatable. Inventory quantities, transaction creation, and financial calculations are better handled through Python and database functions than through free-form model reasoning. This reduces the chance of hallucinated stock levels or inconsistent totals.
 
-Workflow
-The final workflow of the system is:
+At the same time, the orchestrator prompt was designed so that the orchestrator agent is responsible for workflow control: deciding whether an item is in stock, partially in stock, or out of stock; deciding when to request supplier delivery timing; deciding when to create sales or stock-order transactions; and producing the final structured response.
 
-1. Receive a customer request in natural language.
-2. Parse the request into requested items, quantities, and request date.
-3. Normalize item names so common singular/plural and alias variations map to supported inventory items.
-4. Check inventory for each requested item.
-5. Determine whether each item is fully available, partially available, or unavailable.
-6. Estimate supplier delivery timing for shortages.
-7. Calculate quote totals.
-8. Record the relevant transactions in the database.
-9. Return a final response summarizing availability, shortages, pricing, and delivery timing.
+Evaluation Results from test_results.csv
 
-Key Implementation Decisions
-One of the most important parts of the project was improving the request parser. Early versions of the parser were too brittle and failed on realistic customer phrasing. I revised the parsing logic so it could better handle:
-- multiple requested items in one sentence
-- punctuation such as commas, question marks, and periods
-- filler phrases such as “please send,” “I need,” or “I’d like”
-- singular and plural item variations
-- unsupported items, which should be preserved and reported rather than silently dropped
-- duplicate item mentions, which can be merged into a single quantity total
+The generated evaluation file shows that the system demonstrates several clear strengths, but it also reveals important weaknesses.
 
-This was an important improvement because the quality of the entire workflow depends on correctly extracting the customer’s request.
+Strengths observed in the evaluation
 
-Another important design decision was normalizing item names before inventory lookup. This reduced failures caused by small wording differences such as “cup” vs. “cups” or “sticky note” vs. “sticky notes.”
+1. Successful full fulfilment cases
+   Several requests were handled successfully when the parser recognized supported items and the inventory workflow aligned with available stock.
 
-I also updated quote-history search behavior so that searches across multiple terms were more flexible. Using broader matching improved the usefulness of historical quote retrieval.
+   - Request 4 is a good example. The system confirmed fulfilment of 250 sheets of A4 paper and correctly identified “high-quality paper” as unsupported.
+   - Request 9 is another strong case. The system successfully processed 200 units of A4 paper and returned a concise customer-facing response with no restocking needed.
+   - Request 10 is also a strong success case. The system fulfilled 500 sheets of Glossy paper and 300 sheets of Cardstock and reported that no restocking or unsupported items were involved.
+   - Request 15 shows another successful multi-item fulfilment, where 5 sheets of A4 paper and 500 sheets of colored paper were fulfilled together.
 
-Challenges and How I Addressed Them
-The main challenge in this project was balancing an agent-based design with predictable system behavior. A purely LLM-driven solution would have been simpler to describe conceptually, but it would have been harder to validate and debug. I addressed this by using the agent structure mainly for separation of responsibilities while keeping the actual business logic grounded in Python and database-backed helper functions.
+   These examples show that the system can correctly handle supported multi-item requests, calculate totals, and produce a customer-facing fulfilment message when parsing and inventory checks work as intended.
 
-Another challenge was handling natural-language variation in customer requests. Real requests are often messy, and the parser needed several improvements before it could handle more realistic phrasing. I addressed this by making the parsing flow more structured: extract the date first, remove known filler text, split the request into chunks, identify quantity-item pairs, normalize the item names, and preserve unsupported requests for reporting.
+2. Partial fulfilment and restocking behavior
+   The evaluation also shows that the system can detect shortages and trigger restocking workflows.
 
-Testing and Validation
-I tested the system using both targeted parser checks and end-to-end scenarios. My testing focused on:
-- supported item requests that are fully in stock
-- partially fulfilled requests
-- completely out-of-stock requests
-- unsupported item requests
-- requests with punctuation and conversational phrasing
-- alias and singular/plural normalization
-- database transaction creation after processing requests
+   - Request 8 correctly fulfilled 272 sheets of A4 paper and identified a shortage of 228 sheets, with an estimated delivery date.
+   - Request 11 fulfilled 500 sheets of Glossy paper and correctly identified that 28 sheets of A4 paper required restocking.
+   - Request 17 fulfilled 272 sheets of A4 paper and identified a much larger shortage of 728 sheets.
+   - Request 19 also shows shortage handling, where 272 sheets of A4 paper were fulfilled and 1728 additional sheets were identified as needed.
 
-This testing helped reveal weaknesses in parsing and response generation, which led to several refinements in the implementation.
+   These rows demonstrate that the system can distinguish between immediate fulfilment and pending restock, and can communicate both in the final response.
 
-What I Learned
-This project reinforced that multi-agent design is most useful when each component has a clear responsibility and a well-defined interface. I also learned that natural-language input handling is often the weakest part of a system unless it is carefully normalized and validated before downstream processing.
+3. Unsupported item handling
+   The system also shows evidence of correctly identifying unsupported items.
 
-A second key lesson was that deterministic logic is often the best choice for business rules, even in an agentic system. The agent pattern helped structure the solution, but reliability came from explicit parsing, normalization, inventory checks, and transaction logic.
+   - Request 4 correctly flagged “high-quality paper” as unsupported.
+   - Request 5 fulfilled supported items while identifying “sheets of 8” as unsupported.
+   - Request 6 identified “white printer paper” as unsupported.
+   - Request 20 correctly identified “posters” and “tickets” as unsupported while also handling a stock shortage for Flyers.
 
-Future Improvements
-If I continued improving this project, I would:
-- expand the parser to support more request formats such as “cups x 10”
-- improve the final response formatting to make customer messages more polished
-- strengthen automated tests further with more edge cases
-- make quote-history usage more intelligent when generating pricing context
-- separate quote generation from transaction creation more explicitly if the business process required quotes to be non-binding until accepted
+   These examples show that the parser and normalization logic can separate supported and unsupported requests rather than failing completely.
 
-Overall Reflection
-Overall, I believe the final design is a practical multi-agent solution that balances modularity with reliability. The orchestrator-and-specialist structure made the workflow easier to understand, while the deterministic implementation choices made the system easier to test and improve. The strongest part of the final solution is the clearer separation of responsibilities combined with more robust request parsing and normalization.
+4. Financial state updates across the run
+   The evaluation file shows that cash balance and inventory value changed over time as requests were processed. This demonstrates that transaction creation and financial reporting are connected to the workflow rather than being static outputs. Even though the balances do not change on every row in the current results, the system does update business state during the run and produces a final financial report at the end.
+
+Weaknesses observed in the evaluation
+
+1. Some requests fall back to generic failure responses
+   Requests 13 and 14 both returned “We could not fully process your request.” This indicates that the orchestrator output was not always successfully parsed into the expected structured format, or that the request was not handled cleanly enough to produce a final customer-ready answer.
+
+2. Response quality issues in earlier outputs
+   One of the major issues identified during iteration was that customer-facing responses could expose too much internal system information. Earlier versions of the system risked leaking internal orchestration-style content such as:
+   - orchestrator summaries
+   - recognized item structures
+   - stock-processing details
+   - historical quote data
+   - internal pricing breakdowns
+   - transaction identifiers
+
+   This is not appropriate for a customer-facing response. The system was later adjusted so that a dedicated customer_message field is used as the only customer-facing summary, while richer orchestration data is kept internal.
+
+3. Inconsistencies in delivery dates and stock messaging
+   Some rows in test_results.csv show delivery dates that do not align cleanly with the request date or with the expected supplier timing logic. For example, some responses reference dates in 2023 while the request dates are in 2025. This indicates that the system still has consistency issues in how delivery dates are sourced or surfaced.
+
+4. Parsing and normalization edge cases
+   The evaluation also shows that some requests are only partially understood. For example, unusual phrasing or ambiguous item descriptions can lead to unsupported-item classification or incomplete handling. This is especially visible in rows where the response is generic or where the unsupported item wording is awkward.
+
+Reflection on Orchestration Limitations
+
+Although the architecture is described as multi-agent, the current design still has limitations in how fully agent-driven it is.
+
+The intended design is orchestrator-led: the orchestrator should decide delegation, fulfilment status, restocking, transaction creation, totals, and the final customer response. However, in practice, the system still depends on Python for request parsing and for light schema validation/default filling after the orchestrator returns a result. This means the architecture is not a fully autonomous multi-agent system in the strongest sense.
+
+This creates several limitations:
+
+- If the orchestrator returns malformed output, Python fallback logic must repair or replace it.
+- The quality of the final result still depends heavily on deterministic post-processing.
+- Some inconsistencies can appear between orchestrator-generated summaries and the final validated payload.
+- The system is more robust than a fully free-form agent design, but less purely agent-driven than the ideal architecture described in the rubric.
+
+In a future iteration, I would move even more routing, branching, and synthesis responsibility into the orchestrator agent itself. For example, I would require the orchestrator to always return a stricter schema and possibly use structured output enforcement so that less fallback logic is needed in Python.
+
+Design Strengths
+
+The strongest parts of the current design are:
+
+- clear separation of responsibilities between parser, orchestrator, and worker agents
+- deterministic handling of inventory and transactions
+- ability to handle full fulfilment, partial fulfilment, and unsupported items
+- integration with a persistent database for financial state and transaction history
+- improved customer-facing response shaping through a dedicated customer_message field
+
+Suggestions for Further Improvement
+
+1. Improve parser robustness
+   The parser should be expanded to better handle ambiguous phrasing, unusual units, and descriptive item names. This would reduce the number of generic failures and unsupported-item misclassifications.
+
+2. Enforce stricter orchestrator output structure
+   The orchestrator should be constrained more strongly so that it always returns a valid schema. This would reduce fallback cases like Requests 13 and 14 and make the architecture more genuinely orchestrator-led.
+
+3. Improve delivery-date consistency
+   The system should use one clear source of truth for supplier delivery dates and ensure those dates always align with the request date and quantity logic.
+
+4. Add stronger response-quality filtering
+   A final response-shaping layer could validate that customer-facing output never includes internal fields, transaction IDs, raw stock values, or orchestration/debug text.
+
+Conclusion
+
+This project demonstrates a functional multi-agent workflow for inventory checking, quote support, and order processing. The evaluation results show that the system can successfully fulfil supported requests, detect shortages, trigger restocking, and identify unsupported items. At the same time, the generated results also reveal weaknesses in parsing robustness, delivery-date consistency, and response formatting.
+
+Overall, the current implementation is a solid hybrid design: the orchestrator coordinates the workflow, worker agents perform specialized tasks, and deterministic Python/database logic provides reliability. The next major step would be to make the orchestrator even more central to routing and synthesis while improving parser robustness and customer-response consistency.
