@@ -4,9 +4,10 @@ import os
 import time
 import dotenv
 import ast
+import json
 import re
 from typing import Dict, List, Union, Any
-from smolagents import CodeAgent, OpenAIServerModel, tool
+from smolagents import ToolCallingAgent, CodeAgent, OpenAIServerModel, tool
 from sqlalchemy.sql import text
 from datetime import datetime, timedelta
 from sqlalchemy import create_engine, Engine
@@ -522,7 +523,6 @@ def generate_financial_report(as_of_date: Union[str, datetime]) -> Dict:
         "top_selling_products": top_selling_products,
     }
 
-
 def search_quote_history(search_terms: List[str], limit: int = 5) -> List[Dict]:
     """
     Retrieve a list of historical quotes that match any of the provided search terms.
@@ -931,6 +931,65 @@ def parse_customer_request(request_text: str) -> Dict[str, Any]:
         "unsupported_items": unsupported_items,
     }
 
+def extract_json_dict(raw_output: Any) -> Dict[str, Any]:
+    """
+    Best-effort extraction of a JSON object from orchestrator output.
+    """
+    if isinstance(raw_output, dict):
+        return raw_output
+
+    if raw_output is None:
+        return {}
+
+    text = str(raw_output).strip()
+
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return {}
+
+    return {}
+
+
+def normalize_orchestrator_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Apply light validation/defaulting so downstream logic is deterministic.
+    """
+    normalized = {
+        "customer_response": result.get(
+            "customer_response",
+            "We could not fully process your request."
+        ),
+        "stock_status": result.get("stock_status", "failed"),
+        "quoted_total": float(result.get("quoted_total", 0.0) or 0.0),
+        "estimated_delivery": result.get("estimated_delivery"),
+        "fulfilled_items": result.get("fulfilled_items", []) or [],
+        "restock_orders": result.get("restock_orders", []) or [],
+        "unsupported_items": result.get("unsupported_items", []) or [],
+    }
+
+    cleaned_unsupported = []
+    for item in normalized["unsupported_items"]:
+        if isinstance(item, str):
+            name = item.strip()
+            if name:
+                cleaned_unsupported.append(name)
+        elif isinstance(item, dict):
+            name = item.get("item_name") or item.get("name") or ""
+            name = str(name).strip()
+            if name:
+                cleaned_unsupported.append(name)
+
+    normalized["unsupported_items"] = cleaned_unsupported
+    return normalized
+
 """Set up tools for your agents to use, these should be methods that combine the database functions above
  and apply criteria to them to ensure that the flow of the system is correct."""
 
@@ -1055,156 +1114,254 @@ order_agent = CodeAgent(
     description="Use transaction tools to create sales and stock-order records. Return structured dictionary-style outputs only.",
 )
 
-orchestrator_agent = CodeAgent(
+orchestrator_agent = ToolCallingAgent(
     tools=[],
     managed_agents=[inventory_agent, quote_agent, order_agent],
     model=model,
     name="orchestrator_agent",
-    description="Primary workflow controller. Delegates to worker agents, decides fulfillment/restocking flow, records transactions through managed agents, and returns one final structured dictionary.",
+    description=(
+        "Primary workflow controller. Delegates to worker agents, decides fulfillment/restocking flow, "
+        "and returns one final structured JSON plan. The Python layer persists transactions deterministically "
+        "after the orchestrator returns its result."
+    ),
 )
 
-def build_orchestrator_prompt(parsed_request: dict) -> str:
+def build_orchestrator_prompt(user_request: str, parsed_request: Dict[str, Any]) -> str:
+    requested_date = parsed_request.get("requested_date", datetime.now().strftime("%Y-%m-%d"))
+    items = parsed_request.get("items", [])
+
     return f"""
-You are the orchestration agent for a paper sales company.
+You are the orchestration agent for Beaver's Choice Paper Company.
 
-You must control the workflow yourself by delegating tasks to the managed agents:
-- inventory_agent
-- quote_agent
-- order_agent
+Your job:
+1. Understand the customer request.
+2. Delegate to the inventory, quote, and order agents as needed.
+3. Decide whether the request can be fulfilled now, needs restocking, is unsupported, or failed.
+4. Return ONE final JSON object only.
+5. Do NOT record transactions yourself. The Python application will persist transactions after your response.
 
-Customer request data:
-- requested_date: {parsed_request['requested_date']}
-- requested_items: {parsed_request['items']}
-- unsupported_items: {parsed_request['unsupported_items']}
+Customer request:
+{user_request}
 
-Your responsibilities:
-1. For each requested supported item, ask inventory_agent to check stock on the requested date.
-2. Decide whether each item is:
-   - in_stock
-   - partial_stock
-   - out_of_stock
-3. If there is a shortage, ask inventory_agent for supplier delivery timing for the shortage quantity.
-4. Ask quote_agent for similar historical quotes using the recognized item names.
-5. For fulfilled quantities, ask order_agent to create sales transactions.
-6. For shortages, ask order_agent to create stock order transactions.
-7. Compute:
-   - recognized_items
-   - stock_status
-   - restocking_needs
-   - estimated_delivery
-   - subtotal
-   - discount_rate
-   - discount_amount
-   - quoted_total
-   - unsupported_items
-   - historical_quotes
-   - customer_message
+Parsed request date:
+{requested_date}
 
-Important rules:
-- You must perform the workflow through delegation to managed agents.
-- Do not just summarize; return the final result as a Python dictionary.
-- Worker-agent outputs should be treated as structured tool results and incorporated into your final answer.
-- Use exact item names from the request data.
-- Use these prices:
-{PRICE_LIST}
-- Discount rules:
-  - subtotal > 500 => 10%
-  - subtotal > 200 => 5%
-  - otherwise 0%
-- If no supported items are recognized, stock_status should be "unsupported_request".
-- Internal fields such as recognized_items, restocking_needs, historical_quotes, stock calculations, and transaction details are for system use only.
-- customer_message must be the only customer-facing summary.
-- customer_message should clearly describe:
-  - fulfilled items
-  - pending restocks
-  - unsupported items
-  - discount application when relevant
-  - why an item cannot be fulfilled when relevant
-- customer_message must be concise, professional, and customer-oriented.
-- Do not include chain-of-thought, internal reasoning, debug logs, agent scratch work, raw managed-agent transcripts, transaction IDs, raw stock tables, or internal orchestration text in customer_message.
-- Return exactly one final valid Python dictionary with this schema:
+Parsed items:
+{json.dumps(items, indent=2)}
 
+You must return valid JSON with exactly this schema:
 {{
-  "recognized_items": list,
-  "stock_status": str,
-  "restocking_needs": list,
-  "estimated_delivery": str,
-  "subtotal": float,
-  "discount_rate": float,
-  "discount_amount": float,
-  "quoted_total": float,
-  "unsupported_items": list,
-  "historical_quotes": str,
-  "customer_message": str
+  "customer_response": "string",
+  "stock_status": "ready_to_fulfill | pending_restock | unsupported | failed",
+  "quoted_total": 0.0,
+  "estimated_delivery": "string",
+  "fulfilled_items": [
+    {{
+      "item_name": "string",
+      "quantity": 0,
+      "unit_price": 0.0
+    }}
+  ],
+  "restock_orders": [
+    {{
+      "item_name": "string",
+      "quantity": 0,
+      "unit_cost": 0.0
+    }}
+  ],
+  "unsupported_items": ["string"]
 }}
 
-Return only a valid Python dictionary.
-"""
+Rules:
+- Return JSON only. No markdown. No explanation outside the JSON.
+- If items can be sold now, put them in fulfilled_items and use stock_status="ready_to_fulfill".
+- If items require purchasing inventory first, put them in restock_orders and use stock_status="pending_restock".
+- If some items are not sold by the company, list them in unsupported_items and use stock_status="unsupported" unless other supported items are still being processed.
+- quoted_total should reflect the customer-facing total quote when applicable.
+- unit_price is the customer sale price per unit.
+- unit_cost is the company purchase cost per unit for restocking.
+- If something goes wrong, return stock_status="failed" with the best possible customer_response.
+""".strip()
 
-def call_your_multi_agent_system(customer_request: str) -> Dict[str, Any]:
-    parsed_request = parse_customer_request(customer_request)
+def commit_transactions_from_result(
+    parsed_request: Dict[str, Any],
+    result: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """
+    Persist transactions deterministically in Python based on the orchestrator result.
+    Uses the exact parsed request date so financial reports for that date reflect the writes.
+    Includes duplicate protection to avoid double-recording the same transaction.
+    """
+    committed = []
 
-    orchestrator_result = orchestrator_agent.run(
-        build_orchestrator_prompt(parsed_request)
+    requested_date = parsed_request.get("requested_date", datetime.now().strftime("%Y-%m-%d"))
+    fulfilled_items = result.get("fulfilled_items", []) or []
+    restock_orders = result.get("restock_orders", []) or []
+
+    existing_tx = get_transactions_for_date(requested_date)
+
+    def already_recorded(item_name: str, transaction_type: str, quantity: int, total_price: float) -> bool:
+        if existing_tx.empty:
+            return False
+
+        matches = existing_tx[
+            (existing_tx["item_name"] == item_name) &
+            (existing_tx["transaction_type"] == transaction_type) &
+            (existing_tx["units"] == quantity) &
+            (existing_tx["price"].round(2) == round(float(total_price), 2))
+        ]
+        return not matches.empty
+
+    for item in fulfilled_items:
+        item_name = item.get("item_name")
+        quantity = int(item.get("quantity", 0) or 0)
+        unit_price = float(item.get("unit_price", 0.0) or 0.0)
+
+        if not item_name or quantity <= 0:
+            continue
+
+        total_price = quantity * unit_price
+
+        if not already_recorded(item_name, "sales", quantity, total_price):
+            create_transaction(
+                item_name=item_name,
+                quantity=quantity,
+                transaction_type="sales",
+                price=total_price,
+                date=requested_date,
+            )
+            committed.append(
+                {
+                    "item_name": item_name,
+                    "transaction_type": "sales",
+                    "quantity": quantity,
+                    "price": total_price,
+                    "date": requested_date,
+                }
+            )
+
+    for item in restock_orders:
+        item_name = item.get("item_name")
+        quantity = int(item.get("quantity", 0) or 0)
+        unit_cost = float(item.get("unit_cost", 0.0) or 0.0)
+
+        if not item_name or quantity <= 0:
+            continue
+
+        total_cost = quantity * unit_cost
+
+        if not already_recorded(item_name, "stock_orders", quantity, total_cost):
+            create_transaction(
+                item_name=item_name,
+                quantity=quantity,
+                transaction_type="stock_orders",
+                price=total_cost,
+                date=requested_date,
+            )
+            committed.append(
+                {
+                    "item_name": item_name,
+                    "transaction_type": "stock_orders",
+                    "quantity": quantity,
+                    "price": total_cost,
+                    "date": requested_date,
+                }
+            )
+
+    return committed
+
+def call_your_multi_agent_system(user_request: str) -> Dict[str, Any]:
+    """
+    Parse the request, run the orchestrator, normalize its JSON result,
+    commit transactions deterministically, and return customer-facing output.
+    """
+    parsed_request = parse_customer_request(user_request)
+    prompt = build_orchestrator_prompt(user_request, parsed_request)
+
+    raw_response = orchestrator_agent.run(prompt)
+    raw_text = str(raw_response)
+
+    extracted = extract_json_dict(raw_text)
+    normalized = normalize_orchestrator_result(extracted)
+
+    committed = commit_transactions_from_result(parsed_request, normalized)
+
+    return {
+        "customer_response": normalized.get(
+            "customer_response",
+            "We could not fully process your request."
+        ),
+        "stock_status": normalized.get("stock_status", "failed"),
+        "quoted_total": normalized.get("quoted_total", 0.0),
+        "estimated_delivery": normalized.get("estimated_delivery", ""),
+        "fulfilled_items": normalized.get("fulfilled_items", []),
+        "restock_orders": normalized.get("restock_orders", []),
+        "unsupported_items": normalized.get("unsupported_items", []),
+        "transactions_committed": committed,
+        "internal_result": normalized,
+    }
+
+def get_transactions_for_date(request_date: str) -> pd.DataFrame:
+    """
+    Return all transactions recorded for a specific request date.
+    """
+    return pd.read_sql(
+        """
+        SELECT item_name, transaction_type, units, price, transaction_date
+        FROM transactions
+        WHERE transaction_date = :request_date
+        ORDER BY item_name, transaction_type
+        """,
+        db_engine,
+        params={"request_date": request_date},
     )
 
-    response = parse_agent_dict_output(orchestrator_result)
+def audit_request_transactions(request_date: str, response: Dict[str, Any]) -> pd.DataFrame:
+    """
+    Inspect transactions created for the current request date and warn if the
+    response suggests fulfilment/restocking but no matching transactions exist.
+    """
+    tx = get_transactions_for_date(request_date)
 
-    defaults = {
-        "recognized_items": [],
-        "stock_status": "unsupported_request" if not parsed_request["items"] else "pending_restock",
-        "restocking_needs": [],
-        "estimated_delivery": parsed_request["requested_date"],
-        "subtotal": 0.0,
-        "discount_rate": 0.0,
-        "discount_amount": 0.0,
-        "quoted_total": 0.0,
-        "unsupported_items": parsed_request["unsupported_items"],
-        "historical_quotes": "",
-        "customer_message": "We could not fully process your request."
-    }
+    stock_status = response.get("stock_status", "")
+    quoted_total = response.get("quoted_total", 0.0)
 
-    if not isinstance(response, dict) or response.get("_parse_failed"):
-        internal_result = {
-            "orchestrator_summary": str(orchestrator_result),
-            **defaults
-        }
-    else:
-        internal_result = {
-            "orchestrator_summary": str(orchestrator_result),
-            "recognized_items": response.get("recognized_items", defaults["recognized_items"]),
-            "stock_status": response.get("stock_status", defaults["stock_status"]),
-            "restocking_needs": response.get("restocking_needs", defaults["restocking_needs"]),
-            "estimated_delivery": response.get("estimated_delivery", defaults["estimated_delivery"]),
-            "subtotal": float(response.get("subtotal", defaults["subtotal"])),
-            "discount_rate": float(response.get("discount_rate", defaults["discount_rate"])),
-            "discount_amount": float(response.get("discount_amount", defaults["discount_amount"])),
-            "quoted_total": float(response.get("quoted_total", defaults["quoted_total"])),
-            "unsupported_items": response.get("unsupported_items", defaults["unsupported_items"]),
-            "historical_quotes": response.get("historical_quotes", defaults["historical_quotes"]),
-            "customer_message": response.get("customer_message", defaults["customer_message"]),
-        }
+    if stock_status in {"ready_to_fulfill", "pending_restock"} and tx.empty:
+        print(
+            f"WARNING: Request on {request_date} returned stock_status='{stock_status}' "
+            f"but no transactions were recorded for that date."
+        )
 
-    final_payload = {
-        "customer_response": internal_result["customer_message"],
-        "stock_status": internal_result["stock_status"],
-        "quoted_total": internal_result["quoted_total"],
-        "estimated_delivery": internal_result["estimated_delivery"],
-        "internal_result": internal_result,
-    }
+    if stock_status == "ready_to_fulfill":
+        sales_count = (tx["transaction_type"] == "sales").sum() if not tx.empty else 0
+        if sales_count == 0:
+            print(
+                f"WARNING: Request on {request_date} appears fulfilled "
+                f"(quoted_total={quoted_total}) but no sales transaction was recorded."
+            )
 
-    return final_payload
+    if stock_status == "pending_restock" and not tx.empty:
+        sales_count = (tx["transaction_type"] == "sales").sum()
+        stock_order_count = (tx["transaction_type"] == "stock_orders").sum()
+        if sales_count == 0 and stock_order_count == 0:
+            print(
+                f"WARNING: Request on {request_date} is pending_restock but no sales or stock_orders "
+                f"transactions were recorded."
+            )
 
-# Run your test scenarios by writing them here. Make sure to keep track of them.
+    return tx
+
 
 def run_test_scenarios():
-    
     print("Initializing Database...")
     init_database(db_engine)
+
     try:
         quote_requests_sample = pd.read_csv("quote_requests_sample.csv")
         quote_requests_sample["request_date"] = pd.to_datetime(
-            quote_requests_sample["request_date"], format="%m/%d/%y", errors="coerce"
+            quote_requests_sample["request_date"],
+            format="%m/%d/%y",
+            errors="coerce",
         )
         quote_requests_sample.dropna(subset=["request_date"], inplace=True)
         quote_requests_sample = quote_requests_sample.sort_values("request_date")
@@ -1212,49 +1369,47 @@ def run_test_scenarios():
         print(f"FATAL: Error loading test data: {e}")
         return
 
-    # Get initial state
     initial_date = quote_requests_sample["request_date"].min().strftime("%Y-%m-%d")
     report = generate_financial_report(initial_date)
     current_cash = report["cash_balance"]
     current_inventory = report["inventory_value"]
 
-    ############
-    ############
-    ############
-    # INITIALIZE YOUR MULTI AGENT SYSTEM HERE
-    ############
-    ############
-    ############
-
     results = []
+
     for idx, row in quote_requests_sample.iterrows():
         request_date = row["request_date"].strftime("%Y-%m-%d")
 
-        print(f"\n=== Request {idx+1} ===")
+        print(f"\n=== Request {idx + 1} ===")
         print(f"Context: {row['job']} organizing {row['event']}")
         print(f"Request Date: {request_date}")
         print(f"Cash Balance: ${current_cash:.2f}")
         print(f"Inventory Value: ${current_inventory:.2f}")
 
-        # Process request
         request_with_date = f"{row['request']} (Date of request: {request_date})"
 
-        ############
-        ############
-        ############
-        # USE YOUR MULTI AGENT SYSTEM TO HANDLE THE REQUEST
-        ############
-        ############
-        ############
-
         response = call_your_multi_agent_system(request_with_date)
-        
-        # Update state
+
+        print("Normalized orchestrator result:")
+        print(json.dumps(response.get("internal_result", {}), indent=2))
+
+        tx = audit_request_transactions(request_date, response)
+
+        if not tx.empty:
+            print("Transactions recorded for this request date:")
+            print(tx.to_string(index=False))
+        else:
+            print("Transactions recorded for this request date: none")
+
         report = generate_financial_report(request_date)
         current_cash = report["cash_balance"]
         current_inventory = report["inventory_value"]
 
-        print(f"Customer Response: {response.get('customer_response', 'We could not fully process your request.')}")
+        customer_response = response.get(
+            "customer_response",
+            "We could not fully process your request."
+        )
+
+        print(f"Customer Response: {customer_response}")
         print(f"Updated Cash: ${current_cash:.2f}")
         print(f"Updated Inventory: ${current_inventory:.2f}")
 
@@ -1264,24 +1419,20 @@ def run_test_scenarios():
                 "request_date": request_date,
                 "cash_balance": current_cash,
                 "inventory_value": current_inventory,
-                "response": response.get("customer_response", "We could not fully process your request."),
+                "response": customer_response,
+                "transactions_recorded": 0 if tx.empty else len(tx),
             }
         )
 
-
-        # time.sleep(1)
-
-    # Final report
     final_date = quote_requests_sample["request_date"].max().strftime("%Y-%m-%d")
     final_report = generate_financial_report(final_date)
+
     print("\n===== FINAL FINANCIAL REPORT =====")
     print(f"Final Cash: ${final_report['cash_balance']:.2f}")
     print(f"Final Inventory: ${final_report['inventory_value']:.2f}")
 
-    # Save results
     pd.DataFrame(results).to_csv("test_results.csv", index=False)
     return results
-
 
 if __name__ == "__main__":
     results = run_test_scenarios()
